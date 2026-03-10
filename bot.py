@@ -11,6 +11,7 @@ from aiogram.types import (
     InlineKeyboardMarkup,
     Message,
 )
+from aiogram.exceptions import TelegramBadRequest
 from dotenv import load_dotenv
 
 import db
@@ -154,10 +155,13 @@ async def _refresh_user_grid(callback: CallbackQuery, raffle, raffle_id: int):
     reserved = sum(1 for t in tickets if t["status"] == "reserved")
     kb = ticket_grid_keyboard(tickets, raffle_id)
     text = raffle_info_text(raffle, paid, reserved, len(tickets))
-    if callback.message.photo:
-        await callback.message.edit_caption(caption=text, reply_markup=kb, parse_mode="HTML")
-    else:
-        await callback.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
+    try:
+        if callback.message.photo:
+            await callback.message.edit_caption(caption=text, reply_markup=kb, parse_mode="HTML")
+        else:
+            await callback.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
+    except TelegramBadRequest:
+        pass
 
 
 # ──────────────────── User ticket selection ────────────────────
@@ -378,7 +382,10 @@ async def on_refresh_admin(callback: CallbackQuery):
         InlineKeyboardButton(text="🔄 Обновить", callback_data=f"refresh_admin:{raffle_id}"),
         InlineKeyboardButton(text="🚫 Закрыть", callback_data=f"close:{raffle_id}"),
     ])
-    await callback.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
+    try:
+        await callback.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
+    except TelegramBadRequest:
+        pass
     await callback.answer()
 
 
@@ -435,7 +442,10 @@ async def on_admin_ticket_click(callback: CallbackQuery):
         InlineKeyboardButton(text="🔄 Обновить", callback_data=f"refresh_admin:{raffle_id}"),
         InlineKeyboardButton(text="🚫 Закрыть", callback_data=f"close:{raffle_id}"),
     ])
-    await callback.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
+    try:
+        await callback.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
+    except TelegramBadRequest:
+        pass
 
 
 # ──────────────────── Admin: Draw winners ────────────────────
