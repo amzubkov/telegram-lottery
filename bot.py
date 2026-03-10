@@ -110,11 +110,17 @@ async def cmd_start(message: Message):
     reserved = sum(1 for t in tickets if t["status"] == "reserved")
 
     kb = ticket_grid_keyboard(tickets, raffle["id"])
-    await message.answer(
-        raffle_info_text(raffle, paid, reserved, len(tickets)),
-        reply_markup=kb,
-        parse_mode="HTML",
-    )
+    text = raffle_info_text(raffle, paid, reserved, len(tickets))
+
+    if raffle["photo_id"]:
+        await message.answer_photo(
+            photo=raffle["photo_id"],
+            caption=text,
+            reply_markup=kb,
+            parse_mode="HTML",
+        )
+    else:
+        await message.answer(text, reply_markup=kb, parse_mode="HTML")
 
 
 @router.message(Command("my"))
@@ -142,6 +148,18 @@ async def cmd_my_tickets(message: Message):
     await message.answer("\n".join(lines), reply_markup=kb)
 
 
+async def _refresh_user_grid(callback: CallbackQuery, raffle, raffle_id: int):
+    tickets = await db.get_tickets(raffle_id)
+    paid = sum(1 for t in tickets if t["status"] == "paid")
+    reserved = sum(1 for t in tickets if t["status"] == "reserved")
+    kb = ticket_grid_keyboard(tickets, raffle_id)
+    text = raffle_info_text(raffle, paid, reserved, len(tickets))
+    if callback.message.photo:
+        await callback.message.edit_caption(caption=text, reply_markup=kb, parse_mode="HTML")
+    else:
+        await callback.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
+
+
 # ──────────────────── User ticket selection ────────────────────
 
 @router.callback_query(F.data.startswith("ticket:"))
@@ -158,16 +176,7 @@ async def on_ticket_click(callback: CallbackQuery):
     ok = await db.reserve_ticket(raffle_id, num, user.id, user.username or "", user.first_name or "")
     if not ok:
         await callback.answer("Этот билет уже занят!", show_alert=True)
-        # Refresh grid
-        tickets = await db.get_tickets(raffle_id)
-        paid = sum(1 for t in tickets if t["status"] == "paid")
-        reserved = sum(1 for t in tickets if t["status"] == "reserved")
-        kb = ticket_grid_keyboard(tickets, raffle_id)
-        await callback.message.edit_text(
-            raffle_info_text(raffle, paid, reserved, len(tickets)),
-            reply_markup=kb,
-            parse_mode="HTML",
-        )
+        await _refresh_user_grid(callback, raffle, raffle_id)
         return
 
     await callback.answer(
@@ -187,16 +196,7 @@ async def on_ticket_click(callback: CallbackQuery):
         except Exception:
             pass
 
-    # Refresh grid
-    tickets = await db.get_tickets(raffle_id)
-    paid = sum(1 for t in tickets if t["status"] == "paid")
-    reserved = sum(1 for t in tickets if t["status"] == "reserved")
-    kb = ticket_grid_keyboard(tickets, raffle_id)
-    await callback.message.edit_text(
-        raffle_info_text(raffle, paid, reserved, len(tickets)),
-        reply_markup=kb,
-        parse_mode="HTML",
-    )
+    await _refresh_user_grid(callback, raffle, raffle_id)
 
 
 @router.callback_query(F.data.startswith("cancel:"))
@@ -220,6 +220,30 @@ async def cmd_new_raffle(message: Message):
         return
     creation_state[message.from_user.id] = {"step": "prize"}
     await message.answer("🎰 <b>Создание розыгрыша</b>\n\nШаг 1/5: Введите название приза:", parse_mode="HTML")
+
+
+@router.message(F.photo, F.from_user.id.in_(creation_state))
+async def wizard_photo_handler(message: Message):
+    uid = message.from_user.id
+    state = creation_state.get(uid)
+    if not state or state["step"] != "photo":
+        return
+    state["photo_id"] = message.photo[-1].file_id
+    raffle_id = await db.create_raffle(
+        state["prize"], state["count"], state["price"], state["winners"], state["payment"], state["photo_id"]
+    )
+    del creation_state[uid]
+    await message.answer(
+        f"✅ Розыгрыш создан!\n\n"
+        f"🎰 {state['prize']}\n"
+        f"📝 Билетов: {state['count']}\n"
+        f"💰 Цена: {state['price']}₽\n"
+        f"🏆 Победителей: {state['winners']}\n"
+        f"💳 Оплата: {state['payment']}\n"
+        f"🖼 Фото: да\n\n"
+        f"ID: {raffle_id}",
+        parse_mode="HTML",
+    )
 
 
 @router.message(F.text, F.from_user.id.in_(creation_state))
@@ -260,9 +284,16 @@ async def wizard_handler(message: Message):
         await message.answer("Шаг 5/5: Реквизиты для оплаты (номер карты / СБП и т.д.)?")
     elif step == "payment":
         state["payment"] = message.text
-        # Create raffle
+        state["step"] = "photo"
+        await message.answer("Шаг 6/6: Отправьте фото приза (или /skip чтобы пропустить):")
+    elif step == "photo":
+        if message.text and message.text.strip() == "/skip":
+            state["photo_id"] = None
+        else:
+            await message.answer("Отправьте фото или /skip чтобы пропустить.")
+            return
         raffle_id = await db.create_raffle(
-            state["prize"], state["count"], state["price"], state["winners"], state["payment"]
+            state["prize"], state["count"], state["price"], state["winners"], state["payment"], state["photo_id"]
         )
         del creation_state[uid]
         await message.answer(
@@ -271,7 +302,8 @@ async def wizard_handler(message: Message):
             f"📝 Билетов: {state['count']}\n"
             f"💰 Цена: {state['price']}₽\n"
             f"🏆 Победителей: {state['winners']}\n"
-            f"💳 Оплата: {state['payment']}\n\n"
+            f"💳 Оплата: {state['payment']}\n"
+            f"🖼 Фото: {'да' if state['photo_id'] else 'нет'}\n\n"
             f"ID: {raffle_id}",
             parse_mode="HTML",
         )
@@ -459,21 +491,52 @@ async def on_draw_confirm(callback: CallbackQuery):
     winner_tickets = random.sample(paid_tickets, raffle["winners_count"])
     winners = [(t["number"], t["user_id"]) for t in winner_tickets]
 
+    await callback.answer()
+
+    # ─── Анимация розыгрыша ───
+    paid_numbers = [t["number"] for t in paid_tickets]
+    msg = callback.message
+    for i in range(8):
+        # Показываем случайные номера, будто "крутим барабан"
+        fake = random.sample(paid_numbers, min(raffle["winners_count"], len(paid_numbers)))
+        spin_text = "🎰 <b>РОЗЫГРЫШ...</b>\n\n"
+        dots = "." * ((i % 3) + 1)
+        spin_text += f"🎲 Крутим барабан{dots}\n\n"
+        for n in fake:
+            spin_text += f"  ❓ #{n}\n"
+        try:
+            await msg.edit_text(spin_text, parse_mode="HTML")
+        except Exception:
+            pass
+        await asyncio.sleep(0.7)
+
+    # Финальный "замедляющийся" спин
+    for i in range(3):
+        fake = random.sample(paid_numbers, min(raffle["winners_count"], len(paid_numbers)))
+        spin_text = "🎰 <b>РОЗЫГРЫШ...</b>\n\n"
+        spin_text += "🥁 Почти готово...\n\n"
+        for n in fake:
+            spin_text += f"  ❓ #{n}\n"
+        try:
+            await msg.edit_text(spin_text, parse_mode="HTML")
+        except Exception:
+            pass
+        await asyncio.sleep(1.2)
+
+    # ─── Сохраняем и показываем результат ───
     await db.save_winners(raffle_id, winners)
 
-    # Build results message
-    lines = [f"🎉 <b>РЕЗУЛЬТАТЫ РОЗЫГРЫША</b>\n\n🎰 {raffle['prize']}\n\n🏆 Победители:\n"]
+    lines = [f"🎉🎉🎉 <b>РЕЗУЛЬТАТЫ РОЗЫГРЫША</b> 🎉🎉🎉\n\n🎰 {raffle['prize']}\n\n🏆 Победители:\n"]
     for t in winner_tickets:
         name = t["first_name"] or "?"
         uname = f" (@{t['username']})" if t["username"] else ""
-        lines.append(f"  #{t['number']} — <b>{name}</b>{uname}")
+        lines.append(f"  🏆 #{t['number']} — <b>{name}</b>{uname}")
 
     result_text = "\n".join(lines)
 
-    # Show results with ticket grid
     all_winners = await db.get_winners(raffle_id)
     kb = ticket_grid_keyboard(tickets, raffle_id, winners=all_winners)
-    await callback.message.edit_text(result_text + "\n", reply_markup=kb, parse_mode="HTML")
+    await msg.edit_text(result_text + "\n\nПоздравляем! 🥳", reply_markup=kb, parse_mode="HTML")
 
     # Notify winners
     for t in winner_tickets:
@@ -488,8 +551,6 @@ async def on_draw_confirm(callback: CallbackQuery):
             )
         except Exception:
             pass
-
-    await callback.answer("Розыгрыш проведён!")
 
 
 # ──────────────────── Admin: Close raffle ────────────────────

@@ -14,6 +14,7 @@ async def init_db():
                 price INTEGER NOT NULL,
                 winners_count INTEGER NOT NULL,
                 payment_info TEXT NOT NULL DEFAULT '',
+                photo_id TEXT,
                 status TEXT NOT NULL DEFAULT 'active',
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             );
@@ -41,11 +42,11 @@ async def init_db():
         await db.commit()
 
 
-async def create_raffle(prize: str, ticket_count: int, price: int, winners_count: int, payment_info: str) -> int:
+async def create_raffle(prize: str, ticket_count: int, price: int, winners_count: int, payment_info: str, photo_id: str = None) -> int:
     async with aiosqlite.connect(DB_PATH) as db:
         cursor = await db.execute(
-            "INSERT INTO raffles (prize, ticket_count, price, winners_count, payment_info) VALUES (?, ?, ?, ?, ?)",
-            (prize, ticket_count, price, winners_count, payment_info),
+            "INSERT INTO raffles (prize, ticket_count, price, winners_count, payment_info, photo_id) VALUES (?, ?, ?, ?, ?, ?)",
+            (prize, ticket_count, price, winners_count, payment_info, photo_id),
         )
         raffle_id = cursor.lastrowid
         for i in range(1, ticket_count + 1):
