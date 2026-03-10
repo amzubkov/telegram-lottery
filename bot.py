@@ -192,7 +192,7 @@ async def _refresh_user_grid(callback: CallbackQuery, raffle, raffle_id: int):
     tickets = await db.get_tickets(raffle_id)
     paid = sum(1 for t in tickets if t["status"] == "paid")
     reserved = sum(1 for t in tickets if t["status"] == "reserved")
-    kb = ticket_grid_keyboard(tickets, raffle_id)
+    kb = ticket_grid_keyboard(tickets, raffle_id, show_refresh=True)
     text = raffle_info_text(raffle, paid, reserved, len(tickets))
     try:
         if callback.message.photo:
