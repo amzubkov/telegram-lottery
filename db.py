@@ -15,6 +15,8 @@ async def init_db():
                 winners_count INTEGER NOT NULL,
                 payment_info TEXT NOT NULL DEFAULT '',
                 photo_id TEXT,
+                chat_id INTEGER,
+                message_id INTEGER,
                 status TEXT NOT NULL DEFAULT 'active',
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             );
@@ -56,6 +58,15 @@ async def create_raffle(prize: str, ticket_count: int, price: int, winners_count
             )
         await db.commit()
         return raffle_id
+
+
+async def save_group_message(raffle_id: int, chat_id: int, message_id: int):
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            "UPDATE raffles SET chat_id = ?, message_id = ? WHERE id = ?",
+            (chat_id, message_id, raffle_id),
+        )
+        await db.commit()
 
 
 async def get_active_raffle():

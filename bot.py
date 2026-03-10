@@ -114,14 +114,16 @@ async def cmd_start(message: Message):
     text = raffle_info_text(raffle, paid, reserved, len(tickets))
 
     if raffle["photo_id"]:
-        await message.answer_photo(
+        sent = await message.answer_photo(
             photo=raffle["photo_id"],
             caption=text,
             reply_markup=kb,
             parse_mode="HTML",
         )
     else:
-        await message.answer(text, reply_markup=kb, parse_mode="HTML")
+        sent = await message.answer(text, reply_markup=kb, parse_mode="HTML")
+    # Сохраняем ID сообщения в группе для обновления
+    await db.save_group_message(raffle["id"], sent.chat.id, sent.message_id)
 
 
 @router.message(Command("my"))
@@ -147,6 +149,30 @@ async def cmd_my_tickets(message: Message):
             )])
     kb = InlineKeyboardMarkup(inline_keyboard=buttons) if buttons else None
     await message.answer("\n".join(lines), reply_markup=kb)
+
+
+async def _refresh_group_message(raffle, raffle_id: int):
+    """Обновить сетку билетов в групповом сообщении."""
+    if not raffle["chat_id"] or not raffle["message_id"]:
+        return
+    tickets = await db.get_tickets(raffle_id)
+    paid = sum(1 for t in tickets if t["status"] == "paid")
+    reserved = sum(1 for t in tickets if t["status"] == "reserved")
+    kb = ticket_grid_keyboard(tickets, raffle_id)
+    text = raffle_info_text(raffle, paid, reserved, len(tickets))
+    try:
+        if raffle["photo_id"]:
+            await bot.edit_message_caption(
+                chat_id=raffle["chat_id"], message_id=raffle["message_id"],
+                caption=text, reply_markup=kb, parse_mode="HTML",
+            )
+        else:
+            await bot.edit_message_text(
+                chat_id=raffle["chat_id"], message_id=raffle["message_id"],
+                text=text, reply_markup=kb, parse_mode="HTML",
+            )
+    except TelegramBadRequest:
+        pass
 
 
 async def _refresh_user_grid(callback: CallbackQuery, raffle, raffle_id: int):
@@ -446,6 +472,9 @@ async def on_admin_ticket_click(callback: CallbackQuery):
         await callback.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
     except TelegramBadRequest:
         pass
+
+    # Обновить сетку в группе
+    await _refresh_group_message(raffle, raffle_id)
 
 
 # ──────────────────── Admin: Draw winners ────────────────────
