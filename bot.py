@@ -44,7 +44,7 @@ def is_admin(user_id: int) -> bool:
 
 # ──────────────────── Helpers ────────────────────
 
-def ticket_grid_keyboard(tickets, raffle_id: int, admin: bool = False, winners=None):
+def ticket_grid_keyboard(tickets, raffle_id: int, admin: bool = False, winners=None, show_refresh: bool = False):
     """Build inline keyboard grid for tickets."""
     winner_numbers = {w["ticket_number"] for w in winners} if winners else set()
     buttons = []
@@ -68,6 +68,8 @@ def ticket_grid_keyboard(tickets, raffle_id: int, admin: bool = False, winners=N
             row = []
     if row:
         buttons.append(row)
+    if show_refresh:
+        buttons.append([InlineKeyboardButton(text="🔄 Обновить", callback_data=f"refresh_group:{raffle_id}")])
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 
@@ -110,7 +112,7 @@ async def cmd_start(message: Message):
     paid = sum(1 for t in tickets if t["status"] == "paid")
     reserved = sum(1 for t in tickets if t["status"] == "reserved")
 
-    kb = ticket_grid_keyboard(tickets, raffle["id"])
+    kb = ticket_grid_keyboard(tickets, raffle["id"], show_refresh=True)
     text = raffle_info_text(raffle, paid, reserved, len(tickets))
 
     if raffle["photo_id"]:
@@ -158,7 +160,7 @@ async def _refresh_group_message(raffle, raffle_id: int):
     tickets = await db.get_tickets(raffle_id)
     paid = sum(1 for t in tickets if t["status"] == "paid")
     reserved = sum(1 for t in tickets if t["status"] == "reserved")
-    kb = ticket_grid_keyboard(tickets, raffle_id)
+    kb = ticket_grid_keyboard(tickets, raffle_id, show_refresh=True)
     text = raffle_info_text(raffle, paid, reserved, len(tickets))
     try:
         if raffle["photo_id"]:
@@ -173,6 +175,17 @@ async def _refresh_group_message(raffle, raffle_id: int):
             )
     except TelegramBadRequest:
         pass
+
+
+@router.callback_query(F.data.startswith("refresh_group:"))
+async def on_refresh_group(callback: CallbackQuery):
+    raffle_id = int(callback.data.split(":")[1])
+    raffle = await db.get_raffle(raffle_id)
+    if not raffle:
+        await callback.answer("Розыгрыш не найден.")
+        return
+    await _refresh_group_message(raffle, raffle_id)
+    await callback.answer("Обновлено")
 
 
 async def _refresh_user_grid(callback: CallbackQuery, raffle, raffle_id: int):
@@ -473,9 +486,6 @@ async def on_admin_ticket_click(callback: CallbackQuery):
     except TelegramBadRequest:
         pass
 
-    # Обновить сетку в группе
-    await _refresh_group_message(raffle, raffle_id)
-
 
 # ──────────────────── Admin: Draw winners ────────────────────
 
@@ -525,18 +535,24 @@ async def on_draw_confirm(callback: CallbackQuery):
         await callback.answer("Розыгрыш уже завершён.")
         return
 
+    if not raffle["chat_id"] or not raffle["message_id"]:
+        await callback.answer("Сначала опубликуйте розыгрыш в группу через /start", show_alert=True)
+        return
+
     tickets = await db.get_tickets(raffle_id)
     paid_tickets = [t for t in tickets if t["status"] == "paid"]
     winner_tickets = random.sample(paid_tickets, raffle["winners_count"])
     winners = [(t["number"], t["user_id"]) for t in winner_tickets]
 
-    await callback.answer()
+    await callback.answer("Розыгрыш запущен в группе!")
+    await callback.message.edit_text("🎲 Розыгрыш запущен! Смотрите в группе.")
 
-    # ─── Анимация розыгрыша ───
+    # ─── Анимация в групповом сообщении ───
+    chat_id = raffle["chat_id"]
+    message_id = raffle["message_id"]
     paid_numbers = [t["number"] for t in paid_tickets]
-    msg = callback.message
+
     for i in range(8):
-        # Показываем случайные номера, будто "крутим барабан"
         fake = random.sample(paid_numbers, min(raffle["winners_count"], len(paid_numbers)))
         spin_text = "🎰 <b>РОЗЫГРЫШ...</b>\n\n"
         dots = "." * ((i % 3) + 1)
@@ -544,12 +560,14 @@ async def on_draw_confirm(callback: CallbackQuery):
         for n in fake:
             spin_text += f"  ❓ #{n}\n"
         try:
-            await msg.edit_text(spin_text, parse_mode="HTML")
+            await bot.edit_message_text(
+                chat_id=chat_id, message_id=message_id,
+                text=spin_text, parse_mode="HTML",
+            )
         except Exception:
             pass
         await asyncio.sleep(0.7)
 
-    # Финальный "замедляющийся" спин
     for i in range(3):
         fake = random.sample(paid_numbers, min(raffle["winners_count"], len(paid_numbers)))
         spin_text = "🎰 <b>РОЗЫГРЫШ...</b>\n\n"
@@ -557,12 +575,15 @@ async def on_draw_confirm(callback: CallbackQuery):
         for n in fake:
             spin_text += f"  ❓ #{n}\n"
         try:
-            await msg.edit_text(spin_text, parse_mode="HTML")
+            await bot.edit_message_text(
+                chat_id=chat_id, message_id=message_id,
+                text=spin_text, parse_mode="HTML",
+            )
         except Exception:
             pass
         await asyncio.sleep(1.2)
 
-    # ─── Сохраняем и показываем результат ───
+    # ─── Сохраняем и показываем результат в группе ───
     await db.save_winners(raffle_id, winners)
 
     lines = [f"🎉🎉🎉 <b>РЕЗУЛЬТАТЫ РОЗЫГРЫША</b> 🎉🎉🎉\n\n🎰 {raffle['prize']}\n\n🏆 Победители:\n"]
@@ -575,9 +596,16 @@ async def on_draw_confirm(callback: CallbackQuery):
 
     all_winners = await db.get_winners(raffle_id)
     kb = ticket_grid_keyboard(tickets, raffle_id, winners=all_winners)
-    await msg.edit_text(result_text + "\n\nПоздравляем! 🥳", reply_markup=kb, parse_mode="HTML")
+    try:
+        await bot.edit_message_text(
+            chat_id=chat_id, message_id=message_id,
+            text=result_text + "\n\nПоздравляем! 🥳",
+            reply_markup=kb, parse_mode="HTML",
+        )
+    except Exception:
+        pass
 
-    # Notify winners
+    # Notify winners in DM
     for t in winner_tickets:
         try:
             await bot.send_message(
